@@ -1,0 +1,61 @@
+{
+  "name": "dsh-sidebar-focus",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Order and disclosure for the DSH left sidebar, driven by what is actually running: a workspace with a running session floats to the top and opens itself, an idle workspace stays folded. Five switches, each reversible.",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "sidebar",
+    "workspace",
+    "session",
+    "sort",
+    "order",
+    "collapse",
+    "fold",
+    "pin",
+    "running",
+    "activity",
+    "侧边栏",
+    "工作区",
+    "排序",
+    "折叠"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wjingshan/dsh-sidebar-focus.git"
+  },
+  "homepage": "https://github.com/wjingshan/dsh-sidebar-focus#readme",
+  "bugs": {
+    "url": "https://github.com/wjingshan/dsh-sidebar-focus/issues"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  }
+}
