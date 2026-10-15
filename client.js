@@ -3,9 +3,11 @@
  *
  * Order and disclosure for the left sidebar, driven by what is actually running:
  *   1. a workspace with an active session floats to the top of the list;
- *   2. an active session floats to the top of its workspace;
- *   3. a workspace with nothing running stays folded.
- * Each rule is a switch under Settings -> General.
+ *   2. the workspace holding the selected session floats too — a brand-new session renders no
+ *      status dot at all, so rule 1 can never see it;
+ *   3. an active session floats to the top of its workspace;
+ *   4. a workspace with nothing running stays folded.
+ * Each rule is a switch on this bundle's own page in the Plugins panel.
  *
  * ## Contracts this file relies on
  *
@@ -14,11 +16,12 @@
  *
  *   - the scrolling list is a `div[role="tree"]` (`AnimatedRows.render`);
  *   - a workspace header is `div[data-row-key="workspace:<key>"][role="treeitem"][aria-expanded]`,
- *     where `<key>` is the workspace id (`""` for Ungrouped) and whose `parentElement` is that
- *     workspace's group section (`renderGroup` wraps `ProjectRowItem` in the section div);
- *   - a session row is `div[data-row-key="session:<id>"][role="treeitem"][aria-selected]`, whose
- *     FIRST child is the status slot — the only place a row's own state dot lives
- *     (`SessionNodeItem` renders `SessionStatusDots` inside `span.slot`);
+ *     where `<key>` is the workspace id (`""` for Ungrouped). Its `parentElement` is a HoverCard
+ *     span, NOT the section — resolve the section with `sectionOf`;
+ *   - a session row is `div[data-row-key="session:<id>"][role="treeitem"][aria-selected]`, wrapped
+ *     in a HoverCard span of its own, whose FIRST child is the status slot — the only place a
+ *     row's own state dot lives (`SessionNodeItem` renders `SessionStatusDots` inside `span.slot`,
+ *     and only when the row is neither archived nor blank);
  *   - a state dot carries `data-state` in {`ongoing`, `warning`, `done`, `error`, `idle`}
  *     (`ui-primitives` `StateDot`);
  *   - disclosure is persisted by the host store `dsh.workspace.view.v5` and is reachable as
@@ -47,7 +50,7 @@ window.__ModuleLoader__.load({
 
     /** The scrolling session list; both the grouped and the flat body render one. */
     const TREE = '[role="tree"]'
-    /** A workspace header. Its parentElement is that workspace's group section. */
+    /** A workspace header. `parentElement` is NOT its section — see `sectionOf`. */
     const GROUP_HEAD = '[data-row-key^="workspace:"]'
     /** A session row. Its first child is the row's own status slot. */
     const SESSION_ROW = '[data-row-key^="session:"]'
@@ -59,6 +62,18 @@ window.__ModuleLoader__.load({
     const ATTENTION_STATES = ['warning']
     /** The "finished while you were away" reminder dot. */
     const REMINDER_STATES = ['done']
+
+    /**
+     * How long a workspace must look foldable before disclosure may actually close it.
+     *
+     * The host clears `running` before it raises `completionUnread`, so the first "nothing is
+     * running in here" scan can arrive while the finished-session reminder is still in flight.
+     * Folding on that scan shut a workspace that had just produced a result — the "it collapses
+     * the moment the task ends" symptom. The timer only has to outlast that hand-off.
+     */
+    const FOLD_GRACE_MS = 2500
+    /** Base for `order`: every ranked workspace sorts ahead of the unranked ones (order 0). */
+    const RANK_BASE = -10000
 
     /**
      * Attributes written by this plugin. Never observed, so the watcher cannot self-trigger.
@@ -78,26 +93,32 @@ window.__ModuleLoader__.load({
         hint: 'settings.pinBusyWorkspaces.hint',
       },
       {
-        key: 'expandBusyWorkspaces',
+        key: 'pinCurrentWorkspace',
         order: 41,
+        label: 'settings.pinCurrentWorkspace.label',
+        hint: 'settings.pinCurrentWorkspace.hint',
+      },
+      {
+        key: 'expandBusyWorkspaces',
+        order: 42,
         label: 'settings.expandBusyWorkspaces.label',
         hint: 'settings.expandBusyWorkspaces.hint',
       },
       {
         key: 'pinActiveSessions',
-        order: 42,
+        order: 43,
         label: 'settings.pinActiveSessions.label',
         hint: 'settings.pinActiveSessions.hint',
       },
       {
         key: 'foldIdleWorkspaces',
-        order: 43,
+        order: 44,
         label: 'settings.foldIdleWorkspaces.label',
         hint: 'settings.foldIdleWorkspaces.hint',
       },
       {
         key: 'keepAttentionOpen',
-        order: 44,
+        order: 45,
         label: 'settings.keepAttentionOpen.label',
         hint: 'settings.keepAttentionOpen.hint',
       },
@@ -106,6 +127,7 @@ window.__ModuleLoader__.load({
     /** Defaults: every rule on, reminder dots protected. */
     const DEFAULTS = {
       pinBusyWorkspaces: true,
+      pinCurrentWorkspace: true,
       expandBusyWorkspaces: true,
       pinActiveSessions: true,
       foldIdleWorkspaces: true,
@@ -114,48 +136,59 @@ window.__ModuleLoader__.load({
 
     const CSS = `
 /* Rank whole workspaces. The list column is a plain block container, so it is made a flex column
-   first; a busy workspace then leads it. No DOM node moves, so reconciliation is untouched.
-   Both rules are switch-gated: with the switch off, neither attribute exists and the sidebar keeps
-   its stock layout. */
+   first; the ranking itself is written as an inline order on each section, because the rank differs
+   per workspace and no static rule can express that. A workspace keeps the place it earned when its
+   session started — finishing does not drop it back — so this stylesheet's whole job is the flex
+   column. No DOM node moves, so reconciliation is untouched, and with every ranking switch off the
+   attribute is absent and the sidebar keeps its stock layout. */
 [role="tree"][data-wsf-rank-tree]{display:flex;flex-direction:column}
-[role="tree"][data-wsf-rank-tree] > [data-wsf-group][data-wsf-busy]{order:-1}
-/* Rank sessions inside one workspace: the header keeps the first slot, active rows follow it. */
+/* Rank sessions inside one workspace: the header keeps the first slot, active rows follow it.
+   A row is wrapped in HoverCard's own span (see sectionOf), so the flex item that carries order
+   is that span and not the row: every rule matches the wrapped shape first and keeps the unwrapped
+   one for the ungrouped bucket, whose header the host returns bare. */
 [data-wsf-rank-rows]{display:flex;flex-direction:column}
+[data-wsf-rank-rows] > *:has(> [data-row-key^="workspace:"]),
 [data-wsf-rank-rows] > [data-row-key^="workspace:"]{order:-10}
+[data-wsf-rank-rows] > *:has(> [data-row-key^="session:"][data-wsf-active]),
 [data-wsf-rank-rows] > [data-row-key^="session:"][data-wsf-active]{order:-5}
-/* The flat "one list" body ranks active sessions the same way. */
+/* The flat "one list" body ranks active sessions the same way, wrapped the same way. */
+[role="tree"][data-wsf-rank-tree] > *:has(> [data-row-key^="session:"][data-wsf-active]),
 [role="tree"][data-wsf-rank-tree] > [data-row-key^="session:"][data-wsf-active]{order:-1}
 `
 
     const DICT = {
       zh: {
-        'settings.pinBusyWorkspaces.label': '置顶正在运行的工作区',
-        'settings.pinBusyWorkspaces.hint': '有会话正在跑、或正在等你的工作区，排到列表最前（只影响显示，不改动你手动排好的顺序）',
+        'settings.pinBusyWorkspaces.label': '置顶最近有活动的工作区',
+        'settings.pinBusyWorkspaces.hint': '有会话跑过的工作区排到最前，按最近一次活动排序；跑完不会掉回原位，直到别的会话把它顶下去（只影响显示，不改动你手动排好的顺序）',
+        'settings.pinCurrentWorkspace.label': '置顶当前会话所在的工作区',
+        'settings.pinCurrentWorkspace.hint': '你正在用的那个会话（包括刚新建、还没开始跑的）所在的工作区排到最前',
         'settings.expandBusyWorkspaces.label': '自动展开正在运行的工作区',
         'settings.expandBusyWorkspaces.hint': '有会话正在跑、或正在等你的工作区会自动展开，不用再点一下；你亲手折叠过的会保持折叠',
         'settings.pinActiveSessions.label': '置顶正在进行的会话',
         'settings.pinActiveSessions.hint': '运行中与等待你处理的会话，排到所属工作区的最前',
         'settings.foldIdleWorkspaces.label': '收起没有运行的工作区',
-        'settings.foldIdleWorkspaces.hint': '没有任何会话在跑的工作区保持折叠；你手动展开过的会一直留着，直到它重新忙碌',
+        'settings.foldIdleWorkspaces.hint': '没有任何会话在跑的工作区保持折叠；刚跑完的会先留一会儿再收，你手动展开过的会一直留着，直到它重新忙碌',
         'settings.keepAttentionOpen.label': '保留未读完成提醒',
         'settings.keepAttentionOpen.hint': '含「已完成未查看」提醒的工作区不自动折叠，避免漏掉刚跑完的会话',
-        'settings.intro': '左侧工作区的排序与展开：5 个开关各自独立，改动立刻生效。',
-        'settings.summary': '侧栏排序与展开 · 5 个开关',
+        'settings.intro': '左侧工作区的排序与展开：6 个开关各自独立，改动立刻生效。',
+        'settings.summary': '侧栏排序与展开 · 6 个开关',
         'settings.unavailable': '宿主接口不可用，自动折叠已关闭（见控制台）',
       },
       en: {
-        'settings.pinBusyWorkspaces.label': 'Float running workspaces to the top',
-        'settings.pinBusyWorkspaces.hint': 'A workspace with a running or waiting session leads the list (display only; your manual order is never rewritten)',
+        'settings.pinBusyWorkspaces.label': 'Float recently active workspaces',
+        'settings.pinBusyWorkspaces.hint': 'A workspace whose session ran most recently leads the list; finishing does not drop it back — only newer activity pushes it down (display only; your manual order is never rewritten)',
+        'settings.pinCurrentWorkspace.label': 'Float the workspace you are working in',
+        'settings.pinCurrentWorkspace.hint': 'The workspace holding the selected session leads the list — including a brand-new session that has not started yet',
         'settings.expandBusyWorkspaces.label': 'Expand running workspaces automatically',
         'settings.expandBusyWorkspaces.hint': 'A workspace with a running or waiting session opens by itself; one you folded yourself stays folded',
         'settings.pinActiveSessions.label': 'Float active sessions to the top',
         'settings.pinActiveSessions.hint': 'Running and waiting sessions lead their workspace',
         'settings.foldIdleWorkspaces.label': 'Fold workspaces with nothing running',
-        'settings.foldIdleWorkspaces.hint': 'A workspace whose sessions are all idle stays folded; one you opened yourself stays open until it gets busy again',
+        'settings.foldIdleWorkspaces.hint': 'A workspace whose sessions are all idle stays folded; one that just finished is left open for a moment first, and one you opened yourself stays open until it gets busy again',
         'settings.keepAttentionOpen.label': 'Keep unread completion reminders open',
         'settings.keepAttentionOpen.hint': 'A workspace holding a finished-but-unseen session is never folded, so a completed run cannot slip past you',
-        'settings.intro': 'Order and disclosure for the left sidebar: five independent switches, applied immediately.',
-        'settings.summary': 'Sidebar order and disclosure · 5 switches',
+        'settings.intro': 'Order and disclosure for the left sidebar: six independent switches, applied immediately.',
+        'settings.summary': 'Sidebar order and disclosure · 6 switches',
         'settings.unavailable': 'Host interface unavailable — auto-fold is off (see console)',
       },
     }
@@ -253,6 +286,46 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * The group section that owns an element — and NOT `element.parentElement`.
+     *
+     * Every row the host renders is passed through the `HoverCard` primitive, which renders its
+     * anchor inside a wrapper of its own (`ui-primitives` HoverCard returns
+     * `jsxs("span", { ref: rootRef, … children: [Provider({ children: anchor })] })`), and
+     * `ProjectRowItem` skips that wrapper only for the ungrouped bucket
+     * (`if (row.createdAt === void 0) return ownRow`). So for every real workspace the header's
+     * `parentElement` is that span and never the section. Marking the span anchored every rule to
+     * an element the CSS can never match — the sidebar silently kept its stock order, which is
+     * exactly the "nothing floats" symptom.
+     *
+     * A section is therefore found by walking up to the element whose own parent is the tree, or
+     * the `role="group"` container that holds a nested workspace's section.
+     */
+    function sectionOf(tree, element) {
+      let node = element
+      while (node.parentElement !== null) {
+        const parent = node.parentElement
+        if (parent === tree || parent.getAttribute('role') === 'group') return node
+        node = parent
+      }
+      return null
+    }
+
+    /**
+     * The session rows one section owns.
+     *
+     * `:scope > row` finds nothing (the HoverCard span sits in between), and a plain descendant
+     * search would also drag in the rows of a nested workspace group — so every candidate is
+     * attributed by its own section instead.
+     */
+    function rowsOf(tree, group) {
+      const rows = []
+      for (const row of group.querySelectorAll(SESSION_ROW)) {
+        if (sectionOf(tree, row) === group) rows.push(row)
+      }
+      return rows
+    }
+
     /* ------------------------------------------------------------------ *
      * The watcher
      * ------------------------------------------------------------------ */
@@ -299,6 +372,26 @@ window.__ModuleLoader__.load({
       const broken = { value: false }
       let frame = 0
       let stopped = false
+      /**
+       * Ranking is LATCHED, not live. A workspace keeps the place it earned when its session
+       * started: finishing does not drop it back, only a *newer* activity pushes it down. So the
+       * timestamp is written on the idle -> active edge and never refreshed while it stays active,
+       * which is exactly what "the current one shifts down one slot" needs.
+       */
+      const lastActive = new Map()
+      /** Last "this workspace should lead" reading per key, so the edge can be detected. */
+      const activeSeen = new Map()
+      /**
+       * When a workspace first looked foldable. Nothing is closed until it has looked that way for
+       * `FOLD_GRACE_MS`, because the host reports "finished" in two steps (see FOLD_GRACE_MS).
+       */
+      const idleSince = new Map()
+      /** One pending re-check, so a skipped fold is revisited without a DOM change to wake us. */
+      let wakeTimer = 0
+      /** When that pending re-check is due, so the earliest request wins rather than the first. */
+      let wakeAt = 0
+      /** Set when a pass discovers a new activity whose rank that same pass cannot apply yet. */
+      let rankDirty = false
 
       /** Write one disclosure value through the workspace browser's own view store. */
       function write(key, expanded) {
@@ -366,11 +459,18 @@ window.__ModuleLoader__.load({
         return { busy, blocking }
       }
 
-      function scanGroup(settings, group, head, key) {
-        const rows = group.querySelectorAll(`:scope > ${SESSION_ROW}`)
+      function scanGroup(settings, tree, group, head, key, ranking) {
+        const rows = rowsOf(tree, group)
         let busy = false
         let blocking = false
+        // The selected session's workspace is where you are working right now — and a brand-new
+        // session is exactly that case. `SessionNodeItem` renders its status slot as
+        // `!row.blank && …`, so a just-created session draws NO state dot at all, and the status
+        // snapshot has not listed it yet either; neither "busy" source can ever see it. The
+        // selection is read off the row itself (`aria-selected`), which a blank row carries too.
+        let containsCurrent = false
         for (const row of rows) {
+          if (row.getAttribute('aria-selected') === 'true') containsCurrent = true
           const states = rowStates(row)
           const active = hasAny(states, ACTIVE_STATES)
           const attention = hasAny(states, ATTENTION_STATES)
@@ -391,7 +491,31 @@ window.__ModuleLoader__.load({
         // inside it additionally needs a flex section.
         mark(group, 'data-wsf-group', true)
         mark(group, 'data-wsf-rank-rows', settings.pinActiveSessions)
-        mark(group, 'data-wsf-busy', settings.pinBusyWorkspaces && busy)
+        // Two independent reasons to lead, either one is enough — the busy switch owns "busy",
+        // the current-workspace switch owns "selected", and turning one off must not disable
+        // the other.
+        const leads =
+          (settings.pinBusyWorkspaces && busy) || (settings.pinCurrentWorkspace && containsCurrent)
+        mark(group, 'data-wsf-busy', leads)
+
+        // Latch the moment a workspace STARTS leading. Only that edge moves it: while it keeps
+        // leading the stamp stays put, and finishing never rewrites it — which is precisely what
+        // "the finished workspace keeps its place, the newer one shifts it down" needs.
+        if (leads && activeSeen.get(key) !== true) {
+          lastActive.set(key, Date.now())
+          rankDirty = true
+        }
+        activeSeen.set(key, leads)
+
+        // The ranking is written as an inline `order`; the stylesheet only supplies the flex
+        // column, because ranks differ per workspace and no static rule can express that.
+        const rank = ranking.get(key)
+        if (rank === undefined) {
+          if (group.style.order !== '') group.style.order = ''
+        } else {
+          const next = String(RANK_BASE + rank)
+          if (group.style.order !== next) group.style.order = next
+        }
 
         const expanded = head.getAttribute('aria-expanded') === 'true'
         const previous = seen.get(key)
@@ -418,8 +542,6 @@ window.__ModuleLoader__.load({
 
         if (broken.value) return
 
-        const containsCurrent = group.querySelector(`:scope > ${SESSION_ROW}[aria-selected="true"]`) !== null
-
         // The workspace holding the selected session stays open. The host opens that group on its
         // own only while it has no stored state — and we store state, so without this rule a
         // session switch could land on a workspace we had folded.
@@ -433,32 +555,71 @@ window.__ModuleLoader__.load({
           return
         }
         if (!settings.foldIdleWorkspaces) return
-        if (!expanded || blocking || keepOpen.has(key)) return
         // Ungrouped is the catch-all bucket, not a workspace someone chose: never fold it away.
-        if (key === '') return
-        // Folded only while the selected session lives somewhere else.
-        if (containsCurrent) return
+        // Folded only while the selected session lives somewhere else. Every reason to stay open
+        // also resets the grace period below, so a workspace that starts working again during it
+        // is never closed on stale timing.
+        if (!expanded || blocking || keepOpen.has(key) || key === '' || containsCurrent) {
+          idleSince.delete(key)
+          return
+        }
         if (cooling(key)) return
+        // `blocking` already covers a finished-but-unread reminder once it has arrived; this grace
+        // period covers the gap before it does. Folding on the first idle scan is what shut a
+        // workspace at the very moment its task ended.
+        let since = idleSince.get(key)
+        if (since === undefined) {
+          since = Date.now()
+          idleSince.set(key, since)
+        }
+        const remaining = FOLD_GRACE_MS - (Date.now() - since)
+        if (remaining > 0) {
+          wakeIn(remaining)
+          return
+        }
+        idleSince.delete(key)
         write(key, false)
       }
 
       function scan() {
         const settings = config.get()
+        // A new activity is discovered while walking the groups, i.e. AFTER this ranking has been
+        // computed. That changes no DOM, so without the re-scan at the end of this function the
+        // freshly earned order would never reach the sidebar.
+        rankDirty = false
+        // Rank once per scan: most recently activated workspace first. Workspaces that never led
+        // carry no `order` at all, so they keep their stock sequence behind these.
+        const ranking = new Map()
+        const ranked = [...lastActive.entries()].sort((a, b) => b[1] - a[1])
+        for (let at = 0; at < ranked.length; at += 1) ranking.set(ranked[at][0], at)
         const trees = document.querySelectorAll(TREE)
         for (const tree of trees) {
-          // `order` needs a flex column; with both switches off the stock block layout is left alone.
-          mark(tree, 'data-wsf-rank-tree', settings.pinBusyWorkspaces || settings.pinActiveSessions)
+          // `order` needs a flex column; with every ranking switch off the stock block layout is
+          // left alone. The current-workspace rule ranks the same column, so it arms this too.
+          mark(
+            tree,
+            'data-wsf-rank-tree',
+            settings.pinBusyWorkspaces || settings.pinCurrentWorkspace || settings.pinActiveSessions,
+          )
           const heads = tree.querySelectorAll(GROUP_HEAD)
           if (heads.length > 0) {
             for (const head of heads) {
-              const group = head.parentElement
+              const group = sectionOf(tree, head)
               if (group === null) continue
-              scanGroup(settings, group, head, (head.getAttribute('data-row-key') ?? '').slice(GROUP_PREFIX.length))
+              scanGroup(
+                settings,
+                tree,
+                group,
+                head,
+                (head.getAttribute('data-row-key') ?? '').slice(GROUP_PREFIX.length),
+                ranking,
+              )
             }
             continue
           }
-          // Flat "one list" body: active rows lead the whole list.
-          for (const row of tree.querySelectorAll(`:scope > ${SESSION_ROW}`)) {
+          // Flat "one list" body: active rows lead the whole list. These rows are wrapped the same
+          // way, so a descendant search is what finds them.
+          for (const row of tree.querySelectorAll(SESSION_ROW)) {
             const states = rowStates(row)
             mark(
               row,
@@ -467,6 +628,8 @@ window.__ModuleLoader__.load({
             )
           }
         }
+        // A workspace just earned a rank; one more pass is what puts it into the DOM.
+        if (rankDirty) wakeIn(0)
       }
 
       function schedule() {
@@ -480,6 +643,28 @@ window.__ModuleLoader__.load({
             console.error(`[${NS}] a sidebar scan failed:`, error)
           }
         })
+      }
+
+      /**
+       * Ask for one more scan in `ms`.
+       *
+       * A fold that is merely being deferred changes no DOM, so nothing else would wake the
+       * observer afterwards and the workspace would sit on a stale reading forever — this timer is
+       * what lets the grace period actually elapse.
+       */
+      function wakeIn(ms) {
+        if (stopped) return
+        const wait = Math.max(50, Math.ceil(ms))
+        const at = Date.now() + wait
+        // Coalesce the requests, but keep whichever is due first: a rank update must not be pushed
+        // back just because a fold grace period happens to be pending.
+        if (wakeTimer !== 0 && wakeAt <= at) return
+        if (wakeTimer !== 0) window.clearTimeout(wakeTimer)
+        wakeAt = at
+        wakeTimer = window.setTimeout(() => {
+          wakeTimer = 0
+          schedule()
+        }, wait)
       }
 
       const observer = new MutationObserver(schedule)
@@ -505,6 +690,9 @@ window.__ModuleLoader__.load({
           stopStatusWatch()
           stopWorkspaceWatch()
           if (frame !== 0) window.cancelAnimationFrame(frame)
+          if (wakeTimer !== 0) window.clearTimeout(wakeTimer)
+          // The inline `order` is ours as well; clear it before the markers that identify its owners.
+          for (const element of document.querySelectorAll('[data-wsf-group]')) element.style.order = ''
           for (const element of document.querySelectorAll(MARKS.map((name) => `[${name}]`).join(','))) {
             for (const name of MARKS) element.removeAttribute(name)
           }

@@ -1,8 +1,8 @@
 {
   "name": "dsh-sidebar-focus",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "Order and disclosure for the DSH left sidebar, driven by what is actually running: a workspace with a running session floats to the top and opens itself, an idle workspace stays folded. Five switches, each reversible.",
+  "description": "Order and disclosure for the DSH left sidebar, driven by what is actually running: a workspace floats to the top when one of its sessions starts and keeps that place when it finishes, then opens itself. Six switches, each reversible.",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
