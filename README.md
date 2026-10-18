@@ -121,20 +121,28 @@ dsh plugin --profile web add github:wjingshan/dsh-sidebar-focus
 - 安装返回 `application: applied`，profile 的 `dependencies` 与 `dsh.profile.bundles` 都已登记；
 - **实时**客户端注册已生效：`plugins.bundle.config` 席位上出现了 `dsh-sidebar-focus` 这个 key
   （`cordis_inspect_query` 可见）。插件页只在**存在该 key 的注册**时才渲染那块配置
-  （owner 的判据是 `ledger.bundles.has(pkg.name)`），所以这一条同时证明详情页里会出现这 6 个开关；
+  （owner 的判据是 `ledger.bundles.has(pkg.name)`），所以这一条同时证明详情页里会出现这 6 个开关 + 1 个计数器；
 - 原先在「设置 → 通用」的 5 行已确认从 `settings.general.item` 移除，不会两处重复；
 - 状态桥接已确认挂载：`shell.overlay` 的实时占用者里有 `dsh-sidebar-focus.status-bridge`，
   而该席位的 standardProps 同时提供 `useSessionStatus` 与 `useWorkspaces`。
 
-未验证（本机 GUI 需要启动令牌，agent 浏览器无法进入；按插件规范的验证边界，未用截图或模拟 DOM 冒充）：
+**真实 GUI 实测确认（2026-10-17，用户实际操作）**：
 
-- **0.1.1 的根因修复本身**：`sectionOf()` 的三种形状（真实工作区 / 未分组 / 子工作区）与 CSS 的
-  `:has()` 规则都是**从宿主源码推演**的，我没有在真实页面上跑过。推演依据是 `ProjectRowItem`
-  的 `if (row.createdAt === void 0) return ownRow` 与 `HoverCard` 的 `return jsxs("span", …)`；
-- 视觉结果（置顶后的实际顺序、flex 化后的行高与间距、浅色/深色两套主题下的观感）；
-- 六条规则在真实运行/空闲会话上的实际效果，**尤其是这两条**：在一个已折叠的工作区里启动会话，
-  它应当自动展开；以及新建一个会话后，它所在的工作区应当立刻浮到顶部；
-- 与内置 FLIP 行动画、拖拽排序的共存表现。
+- 新建会话的工作区浮到顶部；
+- 会话跑完**不掉回原位**，只有更新的活动才把它挤下去一位；
+- 另一个工作区开跑时，那个顶上来、原来的顺延；
+- 跑完的工作区**不会立刻收起**；
+- 「只保留最近 N 个展开」及其 `− / +` 计数器工作正常。
+
+包括 0.1.1 那个根因修复（`sectionOf()` 的三种形状 + CSS `:has()`）在内，这些行为此前只是从宿主源码
+推演出来的，现在有了真实页面上的确认。
+
+仍未验证（没有可读的 DOM 通道；按插件规范的验证边界，未用截图或模拟 DOM 冒充）：
+
+- 视觉细节：flex 化后的行高与间距、浅色/深色两套主题下的观感；
+- 与内置 FLIP 行动画、拖拽排序的共存表现；
+- **子工作区（树形分组）的排序**：`order` 对子组无效，这是已声明的限制；
+- 在**已折叠**的工作区里启动会话、它应当自动展开这一条，没有被单独复现过（依赖状态快照路径）。
 
 自查方式：刷新 Web 页面 → 打开一个正在跑的工作区（应自动展开并置顶）→ 打开一个空闲工作区
 （应保持折叠，你手动展开后应保持展开）→ 控制台不应出现 `[dsh-sidebar-focus]` 开头的报错。
