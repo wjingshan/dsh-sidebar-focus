@@ -122,9 +122,16 @@ window.__ModuleLoader__.load({
         label: 'settings.keepAttentionOpen.label',
         hint: 'settings.keepAttentionOpen.hint',
       },
+      {
+        key: 'recentWorkspacesOpen',
+        order: 46,
+        kind: 'number',
+        label: 'settings.recentWorkspacesOpen.label',
+        hint: 'settings.recentWorkspacesOpen.hint',
+      },
     ]
 
-    /** Defaults: every rule on, reminder dots protected. */
+    /** Defaults: every rule on, the two most recently active workspaces kept open, reminders protected. */
     const DEFAULTS = {
       pinBusyWorkspaces: true,
       pinCurrentWorkspace: true,
@@ -132,6 +139,17 @@ window.__ModuleLoader__.load({
       pinActiveSessions: true,
       foldIdleWorkspaces: true,
       keepAttentionOpen: true,
+      /** How many of the most recently active workspaces stay open; 0 disables this rule. */
+      recentWorkspacesOpen: 2,
+    }
+
+    /** Upper bound for the counter: the rule is about attention, not about keeping everything open. */
+    const RECENT_OPEN_MAX = 20
+
+    /** Keep a counter value an integer inside the accepted range. */
+    function clampRecentOpen(value) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULTS.recentWorkspacesOpen
+      return Math.min(RECENT_OPEN_MAX, Math.max(0, Math.round(value)))
     }
 
     const CSS = `
@@ -170,8 +188,12 @@ window.__ModuleLoader__.load({
         'settings.foldIdleWorkspaces.hint': '没有任何会话在跑的工作区保持折叠；刚跑完的会先留一会儿再收，你手动展开过的会一直留着，直到它重新忙碌',
         'settings.keepAttentionOpen.label': '保留未读完成提醒',
         'settings.keepAttentionOpen.hint': '含「已完成未查看」提醒的工作区不自动折叠，避免漏掉刚跑完的会话',
-        'settings.intro': '左侧工作区的排序与展开：6 个开关各自独立，改动立刻生效。',
-        'settings.summary': '侧栏排序与展开 · 6 个开关',
+        'settings.recentWorkspacesOpen.label': '只保留最近活跃的工作区展开',
+        'settings.recentWorkspacesOpen.hint': '最近有会话跑过的前 N 个工作区保持展开，其余空闲的在宽限期后收起；设为 0 关闭这条',
+        'settings.decrease': '减少',
+        'settings.increase': '增加',
+        'settings.intro': '左侧工作区的排序与展开：6 个开关加 1 个数量，各自独立，改动立刻生效。',
+        'settings.summary': '侧栏排序与展开 · 6 开关 + 1 数量',
         'settings.unavailable': '宿主接口不可用，自动折叠已关闭（见控制台）',
       },
       en: {
@@ -187,8 +209,12 @@ window.__ModuleLoader__.load({
         'settings.foldIdleWorkspaces.hint': 'A workspace whose sessions are all idle stays folded; one that just finished is left open for a moment first, and one you opened yourself stays open until it gets busy again',
         'settings.keepAttentionOpen.label': 'Keep unread completion reminders open',
         'settings.keepAttentionOpen.hint': 'A workspace holding a finished-but-unseen session is never folded, so a completed run cannot slip past you',
-        'settings.intro': 'Order and disclosure for the left sidebar: six independent switches, applied immediately.',
-        'settings.summary': 'Sidebar order and disclosure · 6 switches',
+        'settings.recentWorkspacesOpen.label': 'Keep only the most recently active workspaces open',
+        'settings.recentWorkspacesOpen.hint': 'The N workspaces with the most recent session activity stay open; the rest fold after the grace period. Set to 0 to turn this rule off',
+        'settings.decrease': 'Decrease',
+        'settings.increase': 'Increase',
+        'settings.intro': 'Order and disclosure for the left sidebar: six switches and one count, each independent and applied immediately.',
+        'settings.summary': 'Sidebar order and disclosure · 6 switches + 1 count',
         'settings.unavailable': 'Host interface unavailable — auto-fold is off (see console)',
       },
     }
@@ -206,7 +232,14 @@ window.__ModuleLoader__.load({
         const parsed = JSON.parse(raw)
         if (parsed === null || typeof parsed !== 'object') return next
         for (const key of Object.keys(DEFAULTS)) {
-          if (typeof parsed[key] === 'boolean') next[key] = parsed[key]
+          const fallback = DEFAULTS[key]
+          // A number setting must not be accepted as a boolean and vice versa: a stored `true`
+          // for the counter would become NaN and silently disable the rule.
+          if (typeof fallback === 'number') {
+            if (typeof parsed[key] === 'number') next[key] = clampRecentOpen(parsed[key])
+          } else if (typeof parsed[key] === 'boolean') {
+            next[key] = parsed[key]
+          }
         }
       } catch (error) {
         console.error(`[${NS}] settings were unreadable; defaults are in use:`, error)
@@ -559,7 +592,14 @@ window.__ModuleLoader__.load({
         // Folded only while the selected session lives somewhere else. Every reason to stay open
         // also resets the grace period below, so a workspace that starts working again during it
         // is never closed on stale timing.
-        if (!expanded || blocking || keepOpen.has(key) || key === '' || containsCurrent) {
+        //
+        // The N most recently active workspaces stay open regardless of what they are doing now:
+        // those are the ones being returned to, and a session finishing should not close the
+        // workspace it just ran in. `ranking` is the same order the float uses, so "the top two in
+        // the list" and "the two kept open" are the same two.
+        const at = ranking.get(key)
+        const recentlyActive = at !== undefined && at < settings.recentWorkspacesOpen
+        if (!expanded || blocking || keepOpen.has(key) || key === '' || containsCurrent || recentlyActive) {
           idleSince.delete(key)
           return
         }
@@ -716,6 +756,31 @@ window.__ModuleLoader__.load({
     const ROW_LABEL_STYLE = { color: 'var(--dsw-alias-label-primary)', fontSize: '13px', lineHeight: '20px' }
     const ROW_HINT_STYLE = { color: 'var(--dsw-alias-label-tertiary)', fontSize: '12px', lineHeight: '18px' }
     const ROW_NOTE_STYLE = { color: 'var(--dsw-alias-state-warn-primary)', fontSize: '12px', lineHeight: '18px' }
+    const STEPPER_STYLE = { display: 'flex', alignItems: 'center', gap: '6px', flex: 'none' }
+    const STEP_VALUE_STYLE = {
+      minWidth: '20px',
+      textAlign: 'center',
+      color: 'var(--dsw-alias-label-primary)',
+      fontSize: '13px',
+      fontVariantNumeric: 'tabular-nums',
+    }
+
+    /** A square −/+ button, dimmed and inert at the ends of the range. */
+    function stepButtonStyle(disabled) {
+      return {
+        width: '24px',
+        height: '24px',
+        padding: '0',
+        borderRadius: '6px',
+        border: '1px solid var(--dsw-alias-border-l2)',
+        background: 'transparent',
+        color: 'var(--dsw-alias-label-primary)',
+        fontSize: '14px',
+        lineHeight: '1',
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.4 : 1,
+      }
+    }
 
     function switchStyle(on) {
       return {
@@ -793,6 +858,52 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** One counter row: label + hint on the left, − value + on the right. */
+    function StepperRow({ option, config, t }) {
+      const settings = useCell(config)
+      const value = clampRecentOpen(settings[option.key])
+      const set = (next) => config.set(option.key, clampRecentOpen(next))
+      const atMin = value <= 0
+      const atMax = value >= RECENT_OPEN_MAX
+      return h(
+        'div',
+        { style: ROW_STYLE },
+        h(
+          'div',
+          { style: ROW_TEXT_STYLE },
+          h('div', { style: ROW_LABEL_STYLE }, t(option.label)),
+          h('div', { style: ROW_HINT_STYLE }, t(option.hint)),
+        ),
+        h(
+          'div',
+          { style: STEPPER_STYLE },
+          h(
+            'button',
+            {
+              type: 'button',
+              'aria-label': t('settings.decrease'),
+              disabled: atMin,
+              onClick: () => set(value - 1),
+              style: stepButtonStyle(atMin),
+            },
+            '−',
+          ),
+          h('span', { style: STEP_VALUE_STYLE, 'aria-live': 'polite' }, String(value)),
+          h(
+            'button',
+            {
+              type: 'button',
+              'aria-label': t('settings.increase'),
+              disabled: atMax,
+              onClick: () => set(value + 1),
+              style: stepButtonStyle(atMax),
+            },
+            '+',
+          ),
+        ),
+      )
+    }
+
     /**
      * This bundle's configuration block, rendered by the Plugins page inside its
      * own detail page.
@@ -808,7 +919,9 @@ window.__ModuleLoader__.load({
         'div',
         { style: PANEL_STYLE },
         h('div', { style: PANEL_INTRO_STYLE }, t('settings.intro')),
-        ...OPTIONS.map((option) => h(OptionRow, { key: option.key, option, config, foldStatus, t })),
+        ...OPTIONS.map((option) =>
+          h(option.kind === 'number' ? StepperRow : OptionRow, { key: option.key, option, config, foldStatus, t }),
+        ),
       )
     }
 
