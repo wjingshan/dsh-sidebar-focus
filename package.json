@@ -1,6 +1,6 @@
 {
   "name": "dsh-sidebar-focus",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "type": "module",
   "description": "Order and disclosure for the DSH left sidebar, driven by what is actually running: a workspace floats to the top when one of its sessions starts and keeps that place when it finishes, only the N most recently active workspaces stay expanded, and six switches plus one count control each rule.",
   "main": "index.js",

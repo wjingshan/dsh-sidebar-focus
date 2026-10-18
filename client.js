@@ -627,10 +627,21 @@ window.__ModuleLoader__.load({
         // computed. That changes no DOM, so without the re-scan at the end of this function the
         // freshly earned order would never reach the sidebar.
         rankDirty = false
-        // Rank once per scan: most recently activated workspace first. Workspaces that never led
-        // carry no `order` at all, so they keep their stock sequence behind these.
+        // Rank once per scan, in two bands:
+        //   1. workspaces working right now (running or waiting for you), most recent first;
+        //   2. everything else that ever led, most recent first.
+        // A workspace that started long ago and is STILL running therefore cannot sit behind one
+        // that was active a minute ago and is idle. Within a band the order is still "most recent
+        // activity", so finishing never moves a workspace and only newer activity pushes it down.
+        // `busySeen` is last pass's reading (it is updated further down), which is why a newly
+        // started session settles into the first band on the pass after `wakeIn(0)`.
         const ranking = new Map()
-        const ranked = [...lastActive.entries()].sort((a, b) => b[1] - a[1])
+        const ranked = [...lastActive.entries()].sort((a, b) => {
+          const aBusy = busySeen.get(a[0]) === true ? 1 : 0
+          const bBusy = busySeen.get(b[0]) === true ? 1 : 0
+          if (aBusy !== bBusy) return bBusy - aBusy
+          return b[1] - a[1]
+        })
         for (let at = 0; at < ranked.length; at += 1) ranking.set(ranked[at][0], at)
         const trees = document.querySelectorAll(TREE)
         for (const tree of trees) {
